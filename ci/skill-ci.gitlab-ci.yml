@@ -1,0 +1,95 @@
+# Reusable GitLab CI template for agents/* skill and role repositories.
+#
+# Include it from a repo's own .gitlab-ci.yml:
+#
+#   include:
+#     - project: 'agents/platform'
+#       ref: v0.1.0                       # pin to an immutable tag
+#       file: '/ci/skill-ci.gitlab-ci.yml'
+#
+# It validates SKILL.md frontmatter, YAML, shell, Python, scans for secrets,
+# and checks that required repo files exist. It never runs intrusive security
+# tooling against real systems — only static checks and unit tests with mocks.
+#
+# Override SKILLS_PATH if a repo keeps skills somewhere other than ./skills.
+
+variables:
+  SKILLS_PATH: "skills"
+  PLATFORM_REF: "v0.1.2"
+  # Host is taken from the running pipeline (CI_SERVER_HOST), so this template is
+  # portable to any GitLab instance / public mirror — no hardcoded hostname.
+  PLATFORM_PROJECT_PATH: "agents/platform"
+
+stages:
+  - validate
+  - test
+
+default:
+  # Debian slim is enough for the static checks; no Kali tooling needed in CI.
+  image: python:3.12-slim
+  before_script:
+    - python3 -m pip install --quiet --disable-pip-version-check pyyaml pytest 2>/dev/null || true
+    # Fetch the shared CI helpers pinned to a tag (immutable). The clone uses the
+    # pipeline's CI_JOB_TOKEN; agents/platform must list each consumer project in
+    # its CI/CD job-token *inbound* allowlist (Settings > CI/CD > Job token
+    # permissions), which the provisioner sets via the API.
+    - apt-get update -qq && apt-get install -y -qq git shellcheck yamllint >/dev/null 2>&1 || true
+    - git clone --depth 1 --branch "${PLATFORM_REF}" "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${PLATFORM_PROJECT_PATH}.git" /tmp/platform
+    - test -f /tmp/platform/ci/validate_skills.py  # fail fast with a clear error if the clone was denied
+
+skill-metadata:
+  stage: validate
+  script:
+    - python3 /tmp/platform/ci/validate_skills.py "${SKILLS_PATH}"
+
+repo-structure:
+  stage: validate
+  script:
+    - test -f README.md || { echo "README.md missing"; exit 1; }
+    - test -f ROLE.md || test -d "${SKILLS_PATH}" || { echo "ROLE.md or skills/ required"; exit 1; }
+    - echo "repo structure OK"
+
+yaml-lint:
+  stage: validate
+  allow_failure: true
+  script:
+    - 'yamllint -d "{extends: relaxed, rules: {line-length: {max: 160}}}" . || true'
+
+shell-lint:
+  stage: validate
+  script:
+    - |
+      set -e
+      found=0
+      while IFS= read -r f; do
+        found=1
+        echo "shellcheck $f"
+        shellcheck -S warning "$f" || exit 1
+      done < <(find . -name '*.sh' -not -path './.git/*')
+      [ "$found" -eq 0 ] && echo "no shell scripts to lint" || true
+
+python-syntax:
+  stage: validate
+  script:
+    - |
+      set -e
+      while IFS= read -r f; do
+        echo "compile $f"
+        python3 -m py_compile "$f"
+      done < <(find . -name '*.py' -not -path './.git/*')
+      echo "python syntax OK"
+
+secret-scan:
+  stage: validate
+  script:
+    - python3 /tmp/platform/ci/secret_scan.py .
+
+unit-tests:
+  stage: test
+  script:
+    - |
+      if [ -d tests ]; then
+        python3 -m pytest tests -q
+      else
+        echo "no tests/ directory — skipping"
+      fi

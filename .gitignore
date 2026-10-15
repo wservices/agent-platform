@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+# Secrets & local env
+.env
+*.pem
+*.key
+id_*
+# Case artifacts / evidence (never commit real evidence)
+cases/
+evidence/
+*.pcap
+# OS
+.DS_Store
